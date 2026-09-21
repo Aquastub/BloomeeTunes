@@ -19,6 +19,8 @@ class DownloadFolderAccess {
   /// writes to arbitrary shared folders and "All files access" appears.
   static const int _manageStorageMinSdk = 30;
 
+  static int _probeCounter = 0;
+
   /// Whether the app currently may write to arbitrary folders.
   ///
   /// Non-Android platforms have no such gate and always return `true`.
@@ -92,11 +94,21 @@ class DownloadFolderAccess {
       if (!await dir.exists()) {
         await dir.create(recursive: true);
       }
+      // Unique name per call: several downloads are queued back to back (e.g.
+      // "download playlist"), so their checks overlap on the same folder. A
+      // shared probe name made one call delete the file another was still
+      // using, which surfaced as a bogus "No such file or directory".
       final probe = File(
-        '${dir.path}${Platform.pathSeparator}.bloomee_write_test',
+        '${dir.path}${Platform.pathSeparator}'
+        '.bloomee_write_test_${_probeCounter++}_'
+        '${DateTime.now().microsecondsSinceEpoch}',
       );
       await probe.writeAsString('ok', flush: true);
-      await probe.delete();
+      try {
+        await probe.delete();
+      } on FileSystemException {
+        // Already gone: the write succeeded, which is all this check needs.
+      }
       return null;
     } on FileSystemException catch (e) {
       log('checkWritable failed for $dirPath: $e',
