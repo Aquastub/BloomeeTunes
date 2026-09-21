@@ -41,11 +41,11 @@ import 'package:rxdart/rxdart.dart';
 /// setActive(true) → requestAudioFocus() is guaranteed to work.
 ///
 /// ## Interruption Handling
-/// The handler is **synchronous** — matches the official audio_session example.
-/// Per the audio_session documentation:
-///   - AudioInterruptionType.pause END → auto-resume (e.g. call ended)
-///   - AudioInterruptionType.unknown END → do NOT auto-resume (user must press play)
-/// The `_shouldResumeAfterInterruption` bool is a single field encoding one decision.
+/// Audio focus interruptions (ducking, other apps/calls requesting focus,
+/// AUDIOFOCUS_LOSS) are intentionally ignored — playback never pauses or
+/// ducks because of them. Only unplugging headphones
+/// (`becomingNoisyEventStream`) still pauses, since that's a separate,
+/// physical-disconnect mechanism rather than an audio focus event.
 ///
 /// ## Concurrency
 /// All play/resolve operations use [CancelableCompleter] / [CancelableOperation]
@@ -93,8 +93,6 @@ class BloomeeMusicPlayer extends BaseAudioHandler
 
   // ── Audio session state ────────────────────────────────────────────────────
   AudioSession? _audioSession;
-  // Volume before duck — restored when duck ends.
-  double? _volumeBeforeDuck;
   // True only when we paused due to an interruption with AudioInterruptionType.pause.
   // Per audio_session docs: only resume automatically on 'pause' end, never on 'unknown'.
   bool _shouldResumeAfterInterruption = false;
@@ -187,66 +185,12 @@ class BloomeeMusicPlayer extends BaseAudioHandler
 
   // ─── Interruption Handler ─────────────────────────────────────────────────
 
-  /// Synchronous interruption handler.
-  ///
-  /// CRITICAL: This MUST be synchronous. The audio_session official example
-  /// (pub.dev/packages/audio_session/example) uses synchronous calls throughout.
-  /// Async handlers create a race: if BEGIN and END events arrive close together
-  /// (short call, short notification), two async handlers can run concurrently
-  /// and read/write `_shouldResumeAfterInterruption` in undefined order.
-  ///
-  /// Per the audio_session documentation:
-  ///   - `pause` END   → interruption ended, auto-resume
-  ///   - `unknown` END → interruption ended, do NOT auto-resume (user presses play)
+  /// Audio focus is intentionally ignored: playback keeps going through
+  /// ducking, calls, and other apps requesting focus (AUDIOFOCUS_LOSS and
+  /// friends). Only `becomingNoisyEventStream` (headphones unplugged, below)
+  /// still pauses — that is a separate mechanism, not audio focus.
   void _handleInterruptionSync(AudioInterruptionEvent event) {
-    if (_isDisposed) return;
-
-    if (event.begin) {
-      switch (event.type) {
-        case AudioInterruptionType.duck:
-          // Lower volume to 35% for notifications/navigation. Restore on end.
-          _volumeBeforeDuck ??= engine.volume;
-          engine.setVolume((engine.volume * 0.35).clamp(0.0, 1.0));
-
-        case AudioInterruptionType.pause:
-        case AudioInterruptionType.unknown:
-          // Both map to "pause" on begin — the distinction matters only on END.
-          _shouldResumeAfterInterruption = engine.playing;
-          engine.pause(); // fire-and-forget — engine queues the command
-      }
-      return;
-    }
-
-    // — Interruption ended —
-    switch (event.type) {
-      case AudioInterruptionType.duck:
-        final prev = _volumeBeforeDuck;
-        _volumeBeforeDuck = null;
-        if (prev != null) engine.setVolume(prev.clamp(0.0, 1.0));
-
-      case AudioInterruptionType.pause:
-        // e.g. short phone call ended, alarm finished → auto-resume.
-        if (_shouldResumeAfterInterruption) {
-          _shouldResumeAfterInterruption = false;
-          _resumePlaybackAfterInterruption();
-        }
-
-      case AudioInterruptionType.unknown:
-        // Per audio_session docs: "The interruption ended but we should NOT resume."
-        // This includes the case where the OS sends AUDIOFOCUS_LOSS (permanent)
-        // followed later by AUDIOFOCUS_GAIN — the user should press play manually.
-        _shouldResumeAfterInterruption = false;
-    }
-  }
-
-  /// Re-requests audio focus and resumes playback after an interruption ends.
-  /// Called fire-and-forget from the synchronous handler.
-  void _resumePlaybackAfterInterruption() {
-    _activateAudioSession().then((granted) {
-      if (granted && !_isDisposed) engine.play();
-    }).catchError((Object e) {
-      log('Resume after interruption failed: $e', name: 'BloomeeMusicPlayer');
-    });
+    // No-op by design.
   }
 
   void _onHeadphonesUnplugged() {
@@ -456,11 +400,9 @@ class BloomeeMusicPlayer extends BaseAudioHandler
     if (_isDisposed) return;
     _errorHandler.resetCircuitBreaker();
     _shouldResumeAfterInterruption = false;
-    final granted = await _activateAudioSession();
-    if (!granted) {
-      SnackbarService.showMessage('Audio focus denied. Cannot start playback.');
-      return;
-    }
+    // Audio focus is ignored app-wide (see class doc): a denial here (common
+    // on MIUI/OneUI) is logged but never blocks playback.
+    await _activateAudioSession();
     // Cold resume: engine has nothing loaded, but queue has a track
     // (happens after session restore). Resolve and play the current track.
     if (engine.state == EngineState.idle) {
@@ -591,13 +533,10 @@ class BloomeeMusicPlayer extends BaseAudioHandler
       _updateCurrentTrack(track);
 
       if (doPlay) {
-        final granted = await _activateAudioSession();
+        // Audio focus is ignored app-wide (see class doc): a denial here
+        // (common on MIUI/OneUI) is logged but never blocks playback.
+        await _activateAudioSession();
         if (!alive()) return;
-        if (!granted) {
-          SnackbarService.showMessage(
-              'Audio focus denied. Cannot start playback.');
-          return complete();
-        }
       }
 
       _currentResolveOp?.cancel();
