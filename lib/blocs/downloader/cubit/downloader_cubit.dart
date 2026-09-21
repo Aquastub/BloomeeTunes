@@ -7,6 +7,7 @@ import 'package:Bloomee/services/plugin/plugin_service.dart';
 import 'package:Bloomee/services/download/rust_download_service.dart';
 import 'package:Bloomee/src/rust/api/downloader/types.dart';
 import 'package:Bloomee/utils/download_types.dart';
+import 'package:Bloomee/utils/download_folder_access.dart';
 import 'package:path/path.dart' as path;
 import 'package:Bloomee/blocs/internet_connectivity/cubit/connectivity_cubit.dart';
 import 'package:Bloomee/core/models/exported.dart';
@@ -102,16 +103,17 @@ class DownloaderCubit extends Cubit<DownloaderState> {
   }
 
   Future<Directory> _getDownloadDirectory() async {
-    if (Platform.isAndroid || Platform.isIOS) {
-      final directory = (await getDownloadsDirectory()) ??
+    // iOS sandboxes apps, so there is no user-selectable folder there.
+    if (Platform.isIOS) {
+      return (await getDownloadsDirectory()) ??
           await getApplicationDocumentsDirectory();
-      return directory;
     }
     final p = await _settingsDao.getSettingStr(SettingKeys.downPathSetting);
-    if (p != null) {
+    if (p != null && p.trim().isNotEmpty) {
       return Directory(p);
     }
-    return await getApplicationDocumentsDirectory();
+    return (await getDownloadsDirectory()) ??
+        await getApplicationDocumentsDirectory();
   }
 
   void _setupLibrarySubscription() {
@@ -425,6 +427,24 @@ class DownloaderCubit extends Cubit<DownloaderState> {
     }
 
     final directory = await _getDownloadDirectory();
+
+    // Fail fast with a clear message instead of queueing a task that can
+    // only fail later inside the Rust downloader.
+    if (Platform.isAndroid &&
+        !await DownloadFolderAccess.isAppOwnedPath(directory.path) &&
+        !await DownloadFolderAccess.hasAccess()) {
+      SnackbarService.showMessage(
+        'Storage access is off. Enable "All files access" for Bloomee in '
+        'system settings, or reset the download folder.',
+      );
+      return;
+    }
+    final folderProblem =
+        await DownloadFolderAccess.checkWritable(directory.path);
+    if (folderProblem != null) {
+      SnackbarService.showMessage(folderProblem);
+      return;
+    }
 
     if (showSnackbar) {
       SnackbarService.showMessage("Preparing download for ${song.title}...");

@@ -9,8 +9,8 @@ import 'package:Bloomee/core/theme/app_theme.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:Bloomee/l10n/app_localizations.dart';
 import 'package:icons_plus/icons_plus.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:device_info_plus/device_info_plus.dart';
+import 'package:Bloomee/utils/download_folder_access.dart';
+import 'package:Bloomee/screens/widgets/snackbar.dart';
 
 class DownloadSettings extends StatefulWidget {
   const DownloadSettings({super.key});
@@ -19,33 +19,33 @@ class DownloadSettings extends StatefulWidget {
   State<DownloadSettings> createState() => _DownloadSettingsState();
 }
 
-Future<bool> storagePermission() async {
-  final DeviceInfoPlugin info = DeviceInfoPlugin();
-  final AndroidDeviceInfo androidInfo = await info.androidInfo;
-  debugPrint('releaseVersion : ${androidInfo.version.release}');
-  final int androidVersion = int.parse(androidInfo.version.release);
-  bool havePermission = false;
-
-  if (androidVersion >= 13) {
-    final request = await [
-      Permission.videos,
-      Permission.photos,
-    ].request();
-    havePermission =
-        request.values.every((status) => status == PermissionStatus.granted);
-  } else {
-    final status = await Permission.storage.request();
-    havePermission = status.isGranted;
-  }
-
-  if (!havePermission) {
-    await openAppSettings();
-  }
-
-  return havePermission;
-}
-
 class _DownloadSettingsState extends State<DownloadSettings> {
+  Future<void> _pickFolder() async {
+    final cubit = context.read<SettingsCubit>();
+
+    // On Android the chosen folder is written with plain file paths, which
+    // needs "All files access". Ask first so the user isn't surprised later.
+    if (Platform.isAndroid && !await DownloadFolderAccess.hasAccess()) {
+      final granted = await DownloadFolderAccess.request();
+      if (!granted) {
+        SnackbarService.showMessage(
+          'Allow "All files access" to choose a download folder.',
+        );
+        return;
+      }
+    }
+
+    final value = await FilePicker.platform.getDirectoryPath();
+    if (value == null) return;
+
+    final problem = await DownloadFolderAccess.checkWritable(value);
+    if (problem != null) {
+      SnackbarService.showMessage(problem);
+      return;
+    }
+    cubit.setDownPath(value);
+  }
+
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
@@ -109,32 +109,16 @@ class _DownloadSettingsState extends State<DownloadSettings> {
                     icon: MingCute.folder_fill,
                     title: l10n.downloadSettingFolder,
                     subtitle: state.downPath,
-                    roundBottom: Platform.isAndroid,
-                    onTap: Platform.isAndroid
-                        ? () {}
-                        : () async {
-                            FilePicker.platform
-                                .getDirectoryPath()
-                                .then((value) {
-                              if (value != null) {
-                                context
-                                    .read<SettingsCubit>()
-                                    .setDownPath(value);
-                              }
-                            });
-                          },
+                    onTap: _pickFolder,
                   ),
-                  if (!Platform.isAndroid) ...[
-                    const SettingDivider(),
-                    SettingNavTile(
-                      icon: MingCute.refresh_1_line,
-                      title: l10n.downloadSettingResetFolder,
-                      subtitle: l10n.downloadSettingResetFolderSubtitle,
-                      roundBottom: true,
-                      onTap: () =>
-                          context.read<SettingsCubit>().resetDownPath(),
-                    ),
-                  ],
+                  const SettingDivider(),
+                  SettingNavTile(
+                    icon: MingCute.refresh_1_line,
+                    title: l10n.downloadSettingResetFolder,
+                    subtitle: l10n.downloadSettingResetFolderSubtitle,
+                    roundBottom: true,
+                    onTap: () => context.read<SettingsCubit>().resetDownPath(),
+                  ),
                 ],
               ),
               const SizedBox(height: 40),
